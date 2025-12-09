@@ -21,7 +21,7 @@ def convert_html_to_pdf(html_path: str, pdf_path: str = None) -> str:
     try:
         from weasyprint import HTML
         print(f"📄 Converting HTML to PDF using weasyprint...")
-        HTML(filename=str(html_file)).write_pdf(pdf_path)
+        HTML(filename=str(html_file), encoding='utf-8').write_pdf(pdf_path)
         print(f"✓ PDF created: {pdf_path}")
         return str(pdf_path)
     except ImportError:
@@ -31,7 +31,8 @@ def convert_html_to_pdf(html_path: str, pdf_path: str = None) -> str:
     try:
         import pdfkit
         print(f"📄 Converting HTML to PDF using pdfkit...")
-        pdfkit.from_file(str(html_file), str(pdf_path))
+        options = {'encoding': 'UTF-8'}
+        pdfkit.from_file(str(html_file), str(pdf_path), options=options)
         print(f"✓ PDF created: {pdf_path}")
         return str(pdf_path)
     except (ImportError, OSError):

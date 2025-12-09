@@ -660,6 +660,7 @@ class ProgressVisualizer:
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <title>QA Testing Progress Visualizations</title>
     <style>
         body {{
@@ -710,7 +711,7 @@ class ProgressVisualizer:
     </style>
 </head>
 <body>
-    <h1>📊 QA Testing Progress Visualizations</h1>
+    <h1>QA Testing Progress Visualizations</h1>
     
     <div class="info">
         <strong>Report Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
