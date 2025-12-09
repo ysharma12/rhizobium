@@ -1,4 +1,4 @@
-# Rhizobium QA Testing Analyzer
+# QA Testing Reporter
 
 Automated QA testing analysis with Google Drive integration, progress tracking, and beautiful visualizations.
 
