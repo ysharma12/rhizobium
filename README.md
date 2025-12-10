@@ -23,7 +23,7 @@ That's it! One command does everything.
 ## 📁 Project Structure
 
 ```
-rhizobium/
+qa-reporter/
 ├── agent/              # All scripts and tools
 │   ├── 00_START_HERE.md          # Start here!
 │   ├── run_complete_analysis.sh  # Main script (run daily)

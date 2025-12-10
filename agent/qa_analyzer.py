@@ -163,36 +163,61 @@ class QAAnalyzer:
         return (matches / len(sample)) > 0.3
     
     def _classify_value(self, value: str) -> str:
-        """Classify a value as pass, fail, not_available, or unknown."""
+        """Classify a value as pass, fail, not_available, or invalid.
+        
+        Returns:
+            'pass' - Test passed
+            'fail' - Test failed
+            'not_available' - Explicitly marked as n/a
+            'invalid' - Empty cells or unrecognized values (not counted)
+        """
+        # Empty cells or truly missing values are invalid (not counted)
+        # With keep_default_na=False, empty cells come as empty strings
         if pd.isna(value) or value == '':
+            return 'invalid'
+        
+        value_str = str(value).strip()
+        
+        # Empty string after stripping whitespace
+        if value_str == '':
+            return 'invalid'
+        
+        # Replace line breaks and multiple spaces with single space for easier matching
+        value_clean = re.sub(r'\s+', ' ', value_str).strip()
+        value_lower = value_clean.lower()
+        
+        # Check for n/a patterns FIRST (before pass/fail)
+        # Now that we use keep_default_na=False, "n/a" will come as the string "n/a"
+        if value_lower in ['n/a', 'na', 'n-a', 'n a', 'not available', 'not applicable']:
             return 'not_available'
         
-        value_str = str(value).lower().strip()
+        if 'n/a' in value_lower:
+            return 'not_available'
+        
+        if re.search(r'\bn[/\-\s]?a\b', value_lower):
+            return 'not_available'
         
         # Check pass patterns
         for pattern in self.PASS_PATTERNS:
-            if re.search(pattern, value_str, re.IGNORECASE):
+            if re.search(pattern, value_lower, re.IGNORECASE):
                 return 'pass'
         
         # Check fail patterns
         for pattern in self.FAIL_PATTERNS:
-            if re.search(pattern, value_str, re.IGNORECASE):
+            if re.search(pattern, value_lower, re.IGNORECASE):
                 return 'fail'
         
-        # Check not available patterns
-        for pattern in self.NOT_AVAILABLE_PATTERNS:
-            if re.search(pattern, value_str, re.IGNORECASE):
-                return 'not_available'
-        
-        return 'not_available'
+        # Anything else is invalid (not counted in analysis)
+        return 'invalid'
     
     def analyze_sheet(self, sheet_name: str) -> Dict[str, Any]:
         """Analyze a single sheet for pass/fail results."""
         print(f"Analyzing sheet: {sheet_name}")
         
         try:
-            # Read the sheet
-            df = pd.read_excel(self.excel_path, sheet_name=sheet_name)
+            # Read the sheet - keep_default_na=False prevents "n/a" from being converted to NaN
+            # We want to see "n/a" as a string, not as a missing value
+            df = pd.read_excel(self.excel_path, sheet_name=sheet_name, keep_default_na=False, na_values=[''])
             
             # Basic info
             total_rows = len(df)
@@ -242,19 +267,52 @@ class QAAnalyzer:
                 summary = self._analyze_result_column(df, col)
                 column_summaries[col] = summary
             
-            # Calculate overall summary (use the first/primary result column)
-            primary_col = result_columns[0]
-            primary_summary = column_summaries[primary_col]
+            # Calculate overall summary
+            # If multiple columns configured, combine their results
+            if len(result_columns) > 1:
+                # Combine counts from all configured columns
+                combined_pass = sum(column_summaries[col]['pass_count'] for col in result_columns)
+                combined_fail = sum(column_summaries[col]['fail_count'] for col in result_columns)
+                combined_na = sum(column_summaries[col]['not_available_count'] for col in result_columns)
+                combined_invalid = sum(column_summaries[col]['invalid_count'] for col in result_columns)
+                combined_total = combined_pass + combined_fail + combined_na
+                combined_rows = sum(column_summaries[col]['total_rows'] for col in result_columns)
+                
+                primary_summary = {
+                    'pass_count': combined_pass,
+                    'fail_count': combined_fail,
+                    'not_available_count': combined_na,
+                    'invalid_count': combined_invalid,
+                    'total': combined_total,
+                    'total_rows': combined_rows
+                }
+                primary_col = f"{result_columns[0]} + {result_columns[1]}" if len(result_columns) == 2 else f"{len(result_columns)} columns combined"
+            else:
+                # Single column - use its summary directly
+                primary_col = result_columns[0]
+                primary_summary = column_summaries[primary_col]
             
-            # Track configured column letter if available
+            # Track configured column letter(s) if available
             configured_column_letter = None
             if self.sheet_config and sheet_name in self.sheet_config:
-                configured_column_letter = self.sheet_config[sheet_name][0]
+                letters = self.sheet_config[sheet_name]
+                configured_column_letter = ' + '.join(letters) if len(letters) > 1 else letters[0]
             
-            print(f"  📊 Results from '{primary_col}':")
+            if len(result_columns) > 1:
+                print(f"  📊 Combined Results from {len(result_columns)} columns:")
+                for col in result_columns:
+                    col_sum = column_summaries[col]
+                    print(f"     • {col}: Pass={col_sum['pass_count']}, Fail={col_sum['fail_count']}, N/A={col_sum['not_available_count']}")
+                print(f"  📊 Total Combined:")
+            else:
+                print(f"  📊 Results from '{primary_col}':")
+            
             print(f"     Pass: {primary_summary['pass_count']}")
             print(f"     Fail: {primary_summary['fail_count']}")
             print(f"     Not Available: {primary_summary['not_available_count']}")
+            print(f"     Valid Total: {primary_summary['total']} (of {primary_summary['total_rows']} rows)")
+            if primary_summary['invalid_count'] > 0:
+                print(f"     Invalid/Empty: {primary_summary['invalid_count']} (excluded from analysis)")
             print()
             
             return {
@@ -278,25 +336,59 @@ class QAAnalyzer:
             }
     
     def _analyze_result_column(self, df: pd.DataFrame, column: str) -> Dict[str, int]:
-        """Analyze a specific result column for pass/fail/not available counts."""
+        """Analyze a specific result column for pass/fail/not available counts.
+        
+        Only counts valid test results (pass, fail, or explicit n/a).
+        Empty cells and unrecognized values are excluded from the total.
+        """
         pass_count = 0
         fail_count = 0
         not_available_count = 0
+        invalid_count = 0
+        
+        # Debug: sample some values to see what we're working with
+        sample_values = []
+        value_types = {}
         
         for value in df[column]:
             classification = self._classify_value(value)
+            
+            # Track classification types
+            value_types[classification] = value_types.get(classification, 0) + 1
+            
+            # Debug: collect samples from each classification type
+            if classification not in [s.split(' -> ')[1] for s in sample_values]:
+                if len(sample_values) < 10:
+                    repr_val = repr(value)[:50]  # First 50 chars
+                    sample_values.append(f"{repr_val} -> {classification}")
+            
             if classification == 'pass':
                 pass_count += 1
             elif classification == 'fail':
                 fail_count += 1
-            else:
+            elif classification == 'not_available':
                 not_available_count += 1
+            else:
+                # Invalid entries (empty, unrecognized text) - not counted in total
+                invalid_count += 1
+        
+        # Total only includes valid test results (pass, fail, and n/a all count!)
+        valid_total = pass_count + fail_count + not_available_count
+        
+        # Debug output - show sample values from each classification
+        print(f"  [DEBUG] Classification counts: {value_types}")
+        if len(sample_values) > 0:
+            print(f"  [DEBUG] Sample values:")
+            for sample in sample_values[:5]:
+                print(f"         {sample}")
         
         return {
             'pass_count': pass_count,
             'fail_count': fail_count,
             'not_available_count': not_available_count,
-            'total': len(df)
+            'invalid_count': invalid_count,
+            'total': valid_total,
+            'total_rows': len(df)
         }
     
     def analyze_all_sheets(self) -> Dict[str, Any]:
@@ -369,18 +461,27 @@ class QAAnalyzer:
                 configured_letter = result.get('configured_column_letter', None)
                 
                 if configured_letter:
-                    report_lines.append(f"   Configured Column: {configured_letter}")
-                    report_lines.append(f"   Actual Column Name: {primary_col}")
+                    report_lines.append(f"   Configured Column(s): {configured_letter}")
+                    if ' + ' in str(primary_col):
+                        report_lines.append(f"   Analyzing Multiple Columns: {', '.join(result['result_columns'])}")
+                    else:
+                        report_lines.append(f"   Actual Column Name: {primary_col}")
                 else:
                     report_lines.append(f"   Result Column: {primary_col}")
                 
+                report_lines.append(f"   Valid Tests: {summary['total']} (of {summary.get('total_rows', 0)} rows)")
                 report_lines.append(f"   ✓ Pass: {summary['pass_count']}")
                 report_lines.append(f"   ✗ Fail: {summary['fail_count']}")
                 report_lines.append(f"   ⊘ Not Available: {summary['not_available_count']}")
                 
-                # Additional result columns if any
-                if len(result['result_columns']) > 1:
-                    report_lines.append(f"   Other result columns: {', '.join(result['result_columns'][1:])}")
+                if summary.get('invalid_count', 0) > 0:
+                    report_lines.append(f"   ⚠ Invalid/Empty: {summary['invalid_count']} (excluded)")
+                
+                # Show individual column breakdowns if multiple columns
+                if len(result['result_columns']) > 1 and 'column_summaries' in result:
+                    report_lines.append(f"   Column Breakdown:")
+                    for col_name, col_summary in result['column_summaries'].items():
+                        report_lines.append(f"      • {col_name}: Pass={col_summary['pass_count']}, Fail={col_summary['fail_count']}, N/A={col_summary['not_available_count']}")
             else:
                 if 'error' in result:
                     report_lines.append(f"   ⚠ Error: {result['error']}")
@@ -493,7 +594,9 @@ class QAAnalyzer:
                     'pass_count': pass_count,
                     'fail_count': fail_count,
                     'not_available_count': not_available_count,
+                    'invalid_count': summary.get('invalid_count', 0),
                     'total_tests': total_tests,
+                    'total_rows_in_sheet': summary.get('total_rows', total_tests),
                     'pass_percentage': round(pass_count / total_tests * 100, 2) if total_tests > 0 else 0,
                     'fail_percentage': round(fail_count / total_tests * 100, 2) if total_tests > 0 else 0,
                     'not_available_percentage': round(not_available_count / total_tests * 100, 2) if total_tests > 0 else 0,
@@ -507,7 +610,9 @@ class QAAnalyzer:
                     'pass_count': 0,
                     'fail_count': 0,
                     'not_available_count': 0,
+                    'invalid_count': 0,
                     'total_tests': 0,
+                    'total_rows_in_sheet': result.get('total_rows', 0),
                     'pass_percentage': 0,
                     'fail_percentage': 0,
                     'not_available_percentage': 0,
